@@ -1,0 +1,134 @@
+
+name: Build SwiftShader
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows-x64
+            os: windows-latest
+            arch: x64
+
+          - platform: Linux-x64
+            os: ubuntu-latest
+            arch: x64
+
+          - platform: macOS-ARM64
+            os: macos-latest
+            arch: arm64
+
+          - platform: macOS-Intel
+            os: macos-26-intel
+            arch: x86_64
+
+    steps:
+      - name: Checkout SwiftShader
+        uses: actions/checkout@v4
+        with:
+          repository: google/swiftshader
+          ref: master
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-dri3-dev \
+            libxcb-present-dev \
+            libxcb-sync-dev \
+            libxcb-xfixes0-dev \
+            libxshmfence-dev \
+            libwayland-dev \
+            wayland-protocols
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        run: |
+          cmake -S . -B build -A x64 -Thost=x64 `
+            -DSWIFTSHADER_BUILD_TESTS=OFF `
+            -DSWIFTSHADER_BUILD_BENCHMARKS=OFF
+
+      - name: Configure Linux
+        if: runner.os == 'Linux'
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSWIFTSHADER_BUILD_TESTS=OFF \
+            -DSWIFTSHADER_BUILD_BENCHMARKS=OFF
+
+      - name: Configure macOS
+        if: runner.os == 'macOS'
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
+            -DSWIFTSHADER_BUILD_TESTS=OFF \
+            -DSWIFTSHADER_BUILD_BENCHMARKS=OFF
+
+      - name: Compile SwiftShader
+        run: cmake --build build --config Release --target vk_swiftshader --parallel
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+
+          $dll = Get-ChildItem build -Recurse -File |
+            Where-Object { $_.Name -eq "libvk_swiftshader.dll" } |
+            Select-Object -First 1
+
+          $json = Get-ChildItem build -Recurse -File |
+            Where-Object { $_.Name -eq "vk_swiftshader_icd.json" } |
+            Select-Object -First 1
+
+          if (-not $dll -or -not $json) {
+            throw "SwiftShader DLL or ICD JSON not found"
+          }
+
+          Copy-Item $dll.FullName dist/
+          Copy-Item $json.FullName dist/
+
+      - name: Package Linux and macOS
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+
+          find build -type f \( \
+            -name 'libvk_swiftshader.so' -o \
+            -name 'libvk_swiftshader.dylib' -o \
+            -name 'vk_swiftshader_icd.json' \
+          \) -exec cp {} dist/ \;
+
+          if ! find dist -type f -name 'libvk_swiftshader.*' | grep -q .; then
+            echo "SwiftShader shared library not found"
+            exit 1
+          fi
+
+          if [ ! -f dist/vk_swiftshader_icd.json ]; then
+            echo "SwiftShader ICD JSON not found"
+            exit 1
+          fi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SwiftShader-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
